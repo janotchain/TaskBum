@@ -3,13 +3,13 @@
 This guide covers the optional features and their configuration in Morphic.
 
 ## Table of Contents
-
+ 
 - [Chat History Storage](#chat-history-storage)
 - [Search Providers](#search-providers)
 - [Additional AI Providers](#additional-ai-providers)
 - [Other Features](#other-features)
 
-## Chat History Storage
+## Chat History Storages
 
 ### Using Upstash Redis (Recommended for production)
 
