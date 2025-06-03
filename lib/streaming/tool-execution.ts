@@ -1,3 +1,4 @@
+// (Likely in @/lib/streaming/tool-execution.ts)
 import {
   CoreMessage,
   DataStreamWriter,
@@ -6,10 +7,13 @@ import {
   JSONValue
 } from 'ai'
 import { z } from 'zod'
-import { searchSchema } from '../schema/search'
-import { search } from '../tools/search'
-import { ExtendedCoreMessage } from '../types'
 import { getModel } from '../utils/registry'
+// Make sure searchSchema reflects parameters your SearXNG API route can use
+// and that the LLM can reasonably provide for Solana queries.
+import { searchSchema } from '../schema/search'; // This schema is used by the LLM
+import { search as executeSearchViaApi } from '../tools/search'; // This is your client calling the /api/search POST endpoint
+// import { getSolanaTokenInfo } from '../tools/solana-token-info' // NEW - if you create this tool
+import { ExtendedCoreMessage } from '../types'
 import { parseToolCallXml } from './parse-tool-call'
 
 interface ToolExecutionResult {
@@ -20,106 +24,138 @@ interface ToolExecutionResult {
 export async function executeToolCall(
   coreMessages: CoreMessage[],
   dataStream: DataStreamWriter,
-  model: string,
-  searchMode: boolean
+  model: string, // Model for deciding tool call
+  searchMode: boolean // From user preference
 ): Promise<ToolExecutionResult> {
-  // If search mode is disabled, return empty tool call
   if (!searchMode) {
     return { toolCallDataAnnotation: null, toolCallMessages: [] }
   }
 
-  // Convert Zod schema to string representation
-  const searchSchemaString = Object.entries(searchSchema.shape)
+  // Dynamically generate a string representation of the search schema for the LLM prompt
+  let toolDescriptions = `
+Search parameters (for 'search' tool):
+${Object.entries(searchSchema.shape)
     .map(([key, value]) => {
-      const description = value.description
-      const isOptional = value instanceof z.ZodOptional
-      return `- ${key}${isOptional ? ' (optional)' : ''}: ${description}`
+        // @ts-ignore
+      const description = value.description || value._def?.innerType?.description || 'No description';
+      const isOptional = value instanceof z.ZodOptional;
+      return `- ${key}${isOptional ? ' (optional)' : ''}: ${description}`;
     })
-    .join('\n')
-  const defaultMaxResults = model?.includes('ollama') ? 5 : 20
+    .join('\n')}
+Default max_results for search is 10. search_depth can be 'basic' or 'advanced'.
+include_domains can be a comma-separated list like 'solana.com,nosana.io'.
+`
+  // Add descriptions for other tools if they exist
+  // E.g., if you add getSolanaTokenInfoTool:
+  // toolDescriptions += `\n\ngetSolanaTokenInfo parameters:\n- tokenSymbol: string - The token symbol (e.g., $NOS, $JUP)\n- contractAddress (optional): string - The token's contract address on Solana.`
 
-  // Generate tool selection using XML format
+  const currentDate = new Date().toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' })
+  const defaultMaxResults = model?.includes('ollama') ? 5 : 10 // Adjusted for Solana
+
   const toolSelectionResponse = await generateText({
-    model: getModel(model),
-    system: `You are an intelligent assistant that analyzes conversations to select the most appropriate tools and their parameters.
-            You excel at understanding context to determine when and how to use available tools, including crafting effective search queries.
-            Current date: ${new Date().toISOString().split('T')[0]}
+    model: getModel(model), // Use the specified model for tool decision
+    system: `You are an intelligent assistant specializing in the Solana ecosystem.
+Your task is to analyze the user's latest query in the conversation and decide if a tool is needed.
+Current date and time: ${currentDate}.
 
-            Do not include any other text in your response.
-            Respond in XML format with the following structure:
-            <tool_call>
-              <tool>tool_name</tool>
-              <parameters>
-                <query>search query text</query>
-                <max_results>number - ${defaultMaxResults} by default</max_results>
-                <search_depth>basic or advanced</search_depth>
-                <include_domains>domain1,domain2</include_domains>
-                <exclude_domains>domain1,domain2</exclude_domains>
-              </parameters>
-            </tool_call>
+Available tools:
+1. search: Use for finding general information, project details, news, or documentation about Solana projects, tokens, or concepts.
+2. (Future) getSolanaTokenInfo: Use *only if* the user specifically asks for current price, market cap, or detailed on-chain supply metrics for a specific token AND 'search' tool is unlikely to provide this directly.
 
-            Available tools: search
+Based on the user's last message, choose a tool or decide if no tool is needed.
+Prioritize official sources and documentation when crafting search queries. For a query like "What is $NOS?", a good search query parameter might be "Nosana $NOS project overview solana".
 
-            Search parameters:
-            ${searchSchemaString}
+Respond ONLY in XML format.
+If using a tool:
+<tool_call>
+  <tool>tool_name</tool>
+  <parameters>
+    <query>search query text for 'search' tool</query>
+    <max_results>${defaultMaxResults}</max_results>
+    <search_depth>basic</search_depth> <!-- default to basic for speed -->
+    <include_domains>solana.com,nosana.io,jup.ag,solscan.io,coingecko.com,decrypt.co/solana,solanafloor.com</include_domains> <!-- Suggest good starting domains -->
+    <!-- <tokenSymbol>$XYZ</tokenSymbol> for 'getSolanaTokenInfo' tool -->
+  </parameters>
+</tool_call>
 
-            If you don't need a tool, respond with <tool_call><tool></tool></tool_call>`,
-    messages: coreMessages
+If no tool is needed, respond with:
+<tool_call><tool></tool></tool_call>
+
+Tool descriptions:
+${toolDescriptions}
+`,
+    messages: coreMessages.slice(-3) // Use last few messages for context to decide tool
   })
 
-  // Parse the tool selection XML using the search schema
-  const toolCall = parseToolCallXml(toolSelectionResponse.text, searchSchema)
+  // Use your existing parseToolCallXml. It might need adjustment if your XML structure changes.
+  const toolCall = parseToolCallXml(toolSelectionResponse.text, searchSchema) // Pass searchSchema for 'search' tool
 
-  if (!toolCall || toolCall.tool === '') {
+  if (!toolCall || !toolCall.tool) {
     return { toolCallDataAnnotation: null, toolCallMessages: [] }
   }
 
-  const toolCallAnnotation = {
-    type: 'tool_call',
-    data: {
-      state: 'call',
-      toolCallId: `call_${generateId()}`,
-      toolName: toolCall.tool,
-      args: JSON.stringify(toolCall.parameters)
-    }
-  }
-  dataStream.writeData(toolCallAnnotation)
+  const toolCallId = `call_${generateId()}`
+  let toolResultJson: string | undefined;
+  let finalToolName = toolCall.tool; // For annotation
 
-  // Support for search tool only for now
-  const searchResults = await search(
-    toolCall.parameters?.query ?? '',
-    toolCall.parameters?.max_results,
-    toolCall.parameters?.search_depth as 'basic' | 'advanced',
-    toolCall.parameters?.include_domains ?? [],
-    toolCall.parameters?.exclude_domains ?? []
-  )
+  // --- Tool Execution Logic ---
+  try {
+    dataStream.writeData({ type: 'tool_call', data: { state: 'call', toolCallId, toolName: finalToolName, args: JSON.stringify(toolCall.parameters) } })
 
-  const updatedToolCallAnnotation = {
-    ...toolCallAnnotation,
-    data: {
-      ...toolCallAnnotation.data,
-      result: JSON.stringify(searchResults),
-      state: 'result'
+    if (toolCall.tool === 'search') {
+      if (!toolCall.parameters?.query) {
+        console.warn("Search tool called without a query parameter.");
+        toolResultJson = JSON.stringify({ error: "Search query missing." });
+      } else {
+        // `executeSearchViaApi` is your function that calls the /api/search POST endpoint we defined earlier
+        const searchResults = await executeSearchViaApi(
+          toolCall.parameters.query,
+          toolCall.parameters.max_results || defaultMaxResults,
+          toolCall.parameters.search_depth as 'basic' | 'advanced' || 'basic',
+          toolCall.parameters.include_domains || [], // Expects array
+          toolCall.parameters.exclude_domains || []  // Expects array
+        )
+        toolResultJson = JSON.stringify(searchResults)
+      }
     }
+    // else if (toolCall.tool === 'getSolanaTokenInfo') { // Example for a new tool
+    //   if (!toolCall.parameters?.tokenSymbol) {
+    //     toolResultJson = JSON.stringify({ error: "Token symbol missing for getSolanaTokenInfo." });
+    //   } else {
+    //     const tokenInfo = await getSolanaTokenInfo(toolCall.parameters.tokenSymbol, toolCall.parameters.contractAddress);
+    //     toolResultJson = JSON.stringify(tokenInfo);
+    //   }
+    // }
+    else {
+      console.warn(`Unknown tool selected by LLM: ${toolCall.tool}`)
+      toolResultJson = JSON.stringify({ error: `Tool '${toolCall.tool}' is not implemented.` })
+    }
+
+    dataStream.writeMessageAnnotation({ type: 'tool_call', data: { state: 'result', toolCallId, toolName: finalToolName, args: JSON.stringify(toolCall.parameters), result: toolResultJson }})
+
+  } catch (toolError) {
+    console.error(`Error executing tool ${finalToolName}:`, toolError);
+    toolResultJson = JSON.stringify({ error: `Failed to execute tool ${finalToolName}: ${toolError instanceof Error ? toolError.message : String(toolError)}` });
+    dataStream.writeMessageAnnotation({ type: 'tool_call', data: { state: 'error', toolCallId, toolName: finalToolName, args: JSON.stringify(toolCall.parameters), result: toolResultJson }})
   }
-  dataStream.writeMessageAnnotation(updatedToolCallAnnotation)
+
 
   const toolCallDataAnnotation: ExtendedCoreMessage = {
     role: 'data',
-    content: {
-      type: 'tool_call',
-      data: updatedToolCallAnnotation.data
-    } as JSONValue
+    content: { type: 'tool_call', data: { toolCallId, toolName: finalToolName, args: JSON.stringify(toolCall.parameters), result: toolResultJson } } as JSONValue
   }
 
   const toolCallMessages: CoreMessage[] = [
+    // The Vercel AI SDK examples often use a 'tool' role message.
+    // Or, you can use an assistant message that "pretends" it got the result.
+    // For simple string results, assistant message is okay. For complex objects, 'tool' role is better.
     {
-      role: 'assistant',
-      content: `Tool call result: ${JSON.stringify(searchResults)}`
+      role: 'assistant', // Or 'tool' role if your main LLM supports it better with `tool_results` name
+      content: `[Tool Used: ${finalToolName}] Output:\n${toolResultJson}`
     },
     {
       role: 'user',
-      content: 'Now answer the user question.'
+      content: 'Based on the tool output and our previous conversation, please provide a comprehensive answer to my original question about the Solana ecosystem. Ensure you synthesize the information and cite sources if they were part of the tool output.'
     }
   ]
 

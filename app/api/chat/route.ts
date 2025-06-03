@@ -8,12 +8,13 @@ import { cookies } from 'next/headers'
 export const maxDuration = 30
 
 const DEFAULT_MODEL: Model = {
-  id: 'gpt-4o-mini',
-  name: 'GPT-4o mini',
-  provider: 'OpenAI',
-  providerId: 'openai',
-  enabled: true,
-  toolCallType: 'native'
+  id: "gemini-2.0-flash-thinking-exp-01-21",
+      name: "Gemini 2.0 Flash Thinking (Exp)",
+      provider: "Google Generative AI",
+      providerId: "google",
+      enabled: true,
+      toolCallType: "manual",
+      toolCallModel: "gemini-2.0-flash"
 }
 
 export async function POST(req: Request) {

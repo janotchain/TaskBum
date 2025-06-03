@@ -15,6 +15,6 @@ export const useCurrentUserImage = () => {
     }
     fetchUserImage()
   }, [])
-
+ 
   return image
 }

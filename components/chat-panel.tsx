@@ -11,8 +11,8 @@ import { useArtifact } from './artifact/artifact-context'
 import { EmptyScreen } from './empty-screen'
 import { ModelSelector } from './model-selector'
 import { SearchModeToggle } from './search-mode-toggle'
-import { Button } from './ui/button'
-import { IconLogo } from './ui/icons'
+import { Button } from './ui/button'; // Assuming using shadcn/ui Button
+import { IconLogo } from './ui/icons'; // Your existing logo icon
 
 interface ChatPanelProps {
   input: string
@@ -115,11 +115,15 @@ export function ChatPanel({
       )}
     >
       {messages.length === 0 && (
-        <div className="mb-10 flex flex-col items-center gap-4">
+        <div className="mb-10 flex flex-col items-center gap-4 text-center"> {/* Added text-center for the parent */}
           <IconLogo className="size-12 text-muted-foreground" />
-          <p className="text-center text-3xl font-semibold">
-            How can I help you today?
+          <p className="text-3xl font-semibold text-foreground"> {/* Applied text-foreground for better contrast */}
+            Explore the Solana Ecosystem with AI
           </p>
+          {/* Optional: Add a smaller sub-headline if needed */}
+          {/* <p className="text-sm text-muted-foreground max-w-md">
+            Ask about projects, tokens, technology, or news within the Solanaverse.
+          </p> */}
         </div>
       )}
       <form
@@ -149,7 +153,7 @@ export function ChatPanel({
             tabIndex={0}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
-            placeholder="Ask a question..."
+            placeholder="Ask about any Solana project, token, or concept..." // Updated placeholder
             spellCheck={false}
             value={input}
             disabled={isLoading || isToolInvocationInProgress()}
@@ -214,14 +218,23 @@ export function ChatPanel({
           </div>
         </div>
 
+        {/* EmptyScreen is shown when input is focused and messages are empty OR always if messages are empty and input has no focus */}
+        {/* The logic for showEmptyScreen will handle its visibility based on focus and input length */}
         {messages.length === 0 && (
           <EmptyScreen
             submitMessage={message => {
+              // When an example is clicked, set it as input and simulate change
               handleInputChange({
                 target: { value: message }
               } as React.ChangeEvent<HTMLTextAreaElement>)
+              // Optionally, auto-focus the input again after clicking an example
+              inputRef.current?.focus()
+              // We don't auto-submit here, user can review/edit then press send
             }}
-            className={cn(showEmptyScreen ? 'visible' : 'invisible')}
+            className={cn(
+              showEmptyScreen || input.length === 0 ? 'visible' : 'invisible', // Show if explicitly set or if input is empty
+              'mt-4' // Added some margin-top
+            )}
           />
         )}
       </form>
